@@ -16,18 +16,19 @@ To install the stealer, follow these steps:
    ```sh
    ./scripts/start_stealer.sh
    ```
-    
-    - **Initialize the Kind Cluster**:
+                        
+                        [or]
+                                    
+    **Initialize the Kind Cluster**:
         Run the `initialize.sh` script to delete any existing Kind cluster named 'local' and create a new one. This script also sets the kubectl context to the local cluster.
         ```sh
-        cd scripts
-        ./initialize.sh
+            cd scripts
+                ./initialize.sh
         ```
-    - **Build and Deploy the Docker Image**:
+    **Build and Deploy the Docker Image**:
         Run the `install.sh` script to build the Docker image for the worker, load it into the Kind cluster, and deploy the worker server using the Kubernetes deployment configuration.
         ```sh
-        cd scripts
-        ./install.sh
+            ./install.sh
         ```
 
 3. **Redeploy the Worker**:
