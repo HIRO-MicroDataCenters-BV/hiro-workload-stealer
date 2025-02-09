@@ -52,10 +52,14 @@ spec:
           env:
           - name: NATS_URL
             value: "demo.nats.io:4222"  
-          - name: NATS_SUBJECT
-            value: "WorkStealingPod"  
+          - name: NATS_WORKLOAD_SUBJECT
+            value: "WorkStealingPod"
+          - name: NATS_RETURN_WORKLOAD_SUBJECT
+            value: "ReturnWorkStealingPod"
           - name: WORK_LOAD_STEAL_LABLE
             value: "WorkLoadSteal"  
+          - name: IGNORE_NAMESPACES
+            value: "default,kube-system,local-path-storage,hiro"
           resources:
             requests:
               memory: "64Mi"

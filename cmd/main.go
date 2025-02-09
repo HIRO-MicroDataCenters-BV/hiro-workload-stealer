@@ -3,24 +3,58 @@ package main
 import (
 	"fmt"
 	"log"
+	"log/slog"
+	"strings"
+	"workloadstealworker/pkg/informer"
 	"workloadstealworker/pkg/worker"
 
+	"github.com/google/uuid"
 	"github.com/spf13/viper"
 )
 
 func main() {
 	stopChan := make(chan bool)
 
-	workerConfig := worker.Config{
+	// To Do: Every resrat of the worker will have a new UUID.
+	// This logic has to be changed so that the UUID is persisted.
+	stealerUUID := uuid.New().String()
+
+	slog.Info("Configuring Worker")
+	natsConfig := worker.NATSConfig{
 		NATSURL:     getENVValue("NATS_URL"),
-		NATSSubject: getENVValue("NATS_SUBJECT"),
+		NATSSubject: getENVValue("NATS_WORKLOAD_SUBJECT"),
 	}
-	informer, err := worker.New(workerConfig)
+	workerConfig := worker.Config{
+		Nconfig:     natsConfig,
+		StealerUUID: stealerUUID,
+	}
+	consumer, err := worker.New(workerConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	go log.Fatal(informer.Start(stopChan))
+	slog.Info("Configuring Informer")
+	informerNATSConfig := informer.NATSConfig{
+		NATSURL:     getENVValue("NATS_URL"),
+		NATSSubject: getENVValue("NATS_RETURN_WORKLOAD_SUBJECT"),
+	}
+	informerConfig := informer.Config{
+		Nconfig:          informerNATSConfig,
+		StealerUUID:      stealerUUID,
+		IgnoreNamespaces: strings.Split(getENVValue("IGNORE_NAMESPACES"), ","),
+	}
+	informer, err := informer.New(informerConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	go func() {
+		consumer.Start(stopChan)
+	}()
+
+	go func() {
+		informer.Start(stopChan)
+	}()
 	<-stopChan
 }
 

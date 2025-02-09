@@ -1,7 +1,8 @@
 #!/bin/bash
 
+CLUSTER_NAME=${1:-local}
 # Run the initialize script
-./scripts/initialize.sh
+./scripts/initialize.sh $CLUSTER_NAME
 
 # Check if the initialize script ran successfully
 if [ $? -ne 0 ]; then
@@ -10,7 +11,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Run the install script
-./scripts/install.sh
+./scripts/install.sh $CLUSTER_NAME
 
 # Check if the install script ran successfully
 if [ $? -ne 0 ]; then
