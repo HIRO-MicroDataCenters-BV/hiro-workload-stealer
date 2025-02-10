@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -141,6 +143,7 @@ func (c *consume) Start(stopChan chan<- bool) error {
 		if err != nil {
 			slog.Error("Failed to Unmarshal donorPodMap from rawData",
 				"error", err, "rawData", string(msg.Data))
+			msg.Nak()
 			return
 		}
 		pod = *donorPod.Pod
@@ -150,10 +153,12 @@ func (c *consume) Start(stopChan chan<- bool) error {
 		if err == nil {
 			slog.Info("Pod already exists, skipping",
 				"podName", pod.Name, "podNamespace", pod.Namespace)
+			msg.Nak()
 			return
 		} else if !apierrors.IsNotFound(err) {
 			slog.Error("Failed to check if Pod exists", "podName", pod.Name,
 				"podNamespace", pod.Namespace, "error", err)
+			msg.Nak()
 			return
 		}
 		donorUUID = donorPod.DonorUUID
@@ -166,6 +171,8 @@ func (c *consume) Start(stopChan chan<- bool) error {
 			if otherStealerUUID == stealerUUID {
 				slog.Info("Skipping Pod, I am already processed it", "podName", pod.Name,
 					"podNamespace", pod.Namespace, "stealerUUID", stealerUUID)
+				StealPod(c.cli, pod, donorUUID, stealerUUID)
+				msg.Ack()
 			} else {
 				slog.Info("Skipping Pod, already processed by another stealer", "podName", pod.Name,
 					"podNamespace", pod.Namespace, "otherStealerUUID", otherStealerUUID)
@@ -173,36 +180,78 @@ func (c *consume) Start(stopChan chan<- bool) error {
 			return
 		}
 
-		// Mark as "Processing" in KV by this stealer
+		// Mark with stealerUUID in KV by this stealer
 		_, err = kv.Put(donorUUID, []byte(stealerUUID))
-		if err != nil {
+		if err != nil && !errors.Is(err, nats.ErrKeyExists) {
 			slog.Error("Failed to put value in KV bucket: ", "error", err)
+			msg.Nak()
+		}
+
+		_, err = StealPod(c.cli, pod, donorUUID, stealerUUID)
+		if err != nil {
+			slog.Error("Failed to steal Pod", "error", err)
+			msg.Nak()
 		}
 
 		// Acknowledge JetStream message
 		msg.Ack()
 
-		if !(CreateNamespace(c.cli, pod.Namespace)) {
-			slog.Error("Failed to create Namespace", "error", err)
-			return
-		}
-
-		sterilizePodInplace(&pod, donorUUID, stealerUUID)
-		// Create the Pod in Kubernetes
-		createdPod, err := c.cli.CoreV1().Pods(pod.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{})
-		if err != nil {
-			slog.Error("Failed to create Pod", "error", err)
-			return
-		}
-		if !isPodSuccesfullyRunning(c.cli, pod.Namespace, pod.Name) {
-			slog.Info("Failed to stole the wrokload", "Pod", createdPod)
-		}
-		slog.Info("Succefully stole the wrokload", "Pod", createdPod)
 	})
 	select {}
 }
 
-func CreateNamespace(cli *kubernetes.Clientset, namespace string) bool {
+func StealPod(cli *kubernetes.Clientset, pod corev1.Pod, donorUUID string, stealerUUID string) (*corev1.Pod, error) {
+	success, err := CreateNamespace(cli, pod.Namespace)
+	if !success || err != nil {
+		slog.Error("Error occurred", "error", err)
+		return nil, err
+	}
+
+	sterilizePodInplace(&pod, donorUUID, stealerUUID)
+
+	// Get the Pod with the specified name and namespace
+	existingPod, err := cli.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	if err == nil {
+		if areMapsEqual(existingPod.Labels, pod.Labels) {
+			slog.Info("Pod already stolen", "podName", pod.Name, "podNamespace", pod.Namespace)
+			return existingPod, nil
+		} else {
+			slog.Error("Cannot Steal; Same Pod exists with the specified details", "podName", pod.Name, "podNamespace", pod.Namespace)
+			return nil, fmt.Errorf("cannot steal; same pod already exists with the specified details: podName=%s, podNamespace=%s", pod.Name, pod.Namespace)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		slog.Error("Failed to get Pod with specified details", "podName", pod.Name, "podNamespace", pod.Namespace, "error", err)
+		return nil, err
+	}
+
+	// Create the Pod in Kubernetes
+	createdPod, err := cli.CoreV1().Pods(pod.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{})
+	if err != nil {
+		slog.Error("Failed to create Pod", "error", err)
+		return nil, err
+	}
+
+	if !isPodSuccesfullyRunning(cli, pod.Namespace, pod.Name) {
+		slog.Error("Pod is not running within 5 min", "pod", createdPod)
+		return nil, fmt.Errorf("pod is not running within 5 min: podName=%s, podNamespace=%s", pod.Name, pod.Namespace)
+	}
+	slog.Info("Successfully stole the workload", "pod", createdPod)
+	return createdPod, nil
+}
+
+func areMapsEqual(map1, map2 map[string]string) bool {
+	if len(map1) != len(map2) {
+		return false
+	}
+	for k, v := range map1 {
+		if map2[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func CreateNamespace(cli *kubernetes.Clientset, namespace string) (bool, error) {
 	// Ensure Namespace exists before creating the Pod
 	_, err := cli.CoreV1().Namespaces().Get(context.TODO(), namespace, metav1.GetOptions{})
 	if err != nil {
@@ -218,28 +267,31 @@ func CreateNamespace(cli *kubernetes.Clientset, namespace string) bool {
 			_, err := cli.CoreV1().Namespaces().Create(context.TODO(), namespace, metav1.CreateOptions{})
 			if err != nil {
 				slog.Error("Failed to create namespace", "namespace", namespace, "error", err)
-				return false
+				return false, err
 			}
 		} else {
 			// Other errors (e.g., API failure)
 			slog.Error("Failed to check namespace existence", "namespace", namespace, "error", err)
-			return false
+			return false, err
 		}
 	}
-	return true
+	return true, nil
 }
 
 func sterilizePodInplace(pod *corev1.Pod, donorUUID string, stealerUUID string) {
-	// Add the donorUUID to the Pod labels
-	stolenPodLablesMap["donorUUID"] = donorUUID
-	stolenPodLablesMap["stealerUUID"] = stealerUUID
 	newPodObjectMeta := metav1.ObjectMeta{
 		Name:        pod.Name,
 		Namespace:   pod.Namespace,
-		Labels:      mergeMaps(pod.Labels, stolenPodLablesMap),
+		Labels:      fetchStolenPodLablesMap(*pod, donorUUID, stealerUUID),
 		Annotations: pod.Annotations,
 	}
 	pod.ObjectMeta = newPodObjectMeta
+}
+
+func fetchStolenPodLablesMap(pod corev1.Pod, donorUUID string, stealerUUID string) map[string]string {
+	stolenPodLablesMap["donorUUID"] = donorUUID
+	stolenPodLablesMap["stealerUUID"] = stealerUUID
+	return mergeMaps(pod.Labels, stolenPodLablesMap)
 }
 
 // pollPodStatus polls the status of a Pod until it is Running or a timeout occurs

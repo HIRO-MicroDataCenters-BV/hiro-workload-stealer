@@ -124,7 +124,7 @@ func (n *notify) Start(stopChan chan<- bool) error {
 			slog.Info("Pod is stolen one, publishing results to NATS", "subject", nsubject,
 				"namespace", pod.Namespace, "name", pod.Name, "labels", pod.Labels)
 
-			PodResults := PodResults{
+			podResults := PodResults{
 				Results: Results{
 					stealerUUID:    n.config.StealerUUID,
 					donorUUID:      pod.Labels["donorUUID"],
@@ -136,20 +136,20 @@ func (n *notify) Start(stopChan chan<- bool) error {
 				},
 				Pod: pod,
 			}
-			// Serialize the entire Pod metadata to JSON
-			metadataJSON, err := json.Marshal(PodResults)
+			// Serialize the entire PodResults to JSON
+			metadataJSON, err := json.Marshal(podResults)
 			if err != nil {
-				slog.Error("Failed to serialize PodResults", "error", err, "podResults", PodResults)
+				slog.Error("Failed to serialize PodResults", "error", err, "podResults", podResults)
 				continue
 			}
 
 			// Publish notification to NATS
 			err = natsConnect.Publish(nsubject, metadataJSON)
 			if err != nil {
-				slog.Error("Failed to publish message to NATS", "error", err, "subject", nsubject, "podResults", PodResults)
+				slog.Error("Failed to publish message to NATS", "error", err, "subject", nsubject, "podResults", podResults)
 				continue
 			}
-			slog.Info("Published Pod metadata to NATS", "subject", nsubject, "metadata", string(metadataJSON))
+			slog.Info("Publishing the finished Pod Results to NATS", "subject", nsubject, "podresults", string(metadataJSON))
 		}
 	}
 	return nil
